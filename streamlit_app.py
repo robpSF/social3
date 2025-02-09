@@ -2,40 +2,30 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import random
+from collections import defaultdict, Counter
 
-# ---------------------------------------
-# 1. Master Probability Mapping
-# ---------------------------------------
+# Master Probability Mapping
 PROB_MAP = {
     "High": 0.9,
     "Moderate": 0.5,
     "Low": 0.3,
-    "None": 0.0  # or call it "Never" if you'd like
+    "None": 0.0
 }
 
-# ---------------------------------------
-# Helper to parse faction-list columns
-# e.g. "Iraqi Public, Jordanian Public" -> ["Iraqi Public","Jordanian Public"]
-# ---------------------------------------
 def parse_faction_list(cell_value):
+    """Parse a comma-separated string of faction names into a list."""
     if pd.isna(cell_value) or str(cell_value).strip() == "":
         return []
-    # split on commas
     return [x.strip() for x in str(cell_value).split(",") if x.strip()]
 
 def main():
     st.title("Faction + Personas Social Graph Demo")
 
-    # ---------------------------------------
-    # 2. File Uploaders for Factions and Personas
-    # ---------------------------------------
-    faction_file = st.file_uploader("Upload Factions Excel", type=["xlsx", "xls"])
-    persona_file = st.file_uploader("Upload Personas Excel", type=["xlsx", "xls"])
+    # File uploaders
+    faction_file = st.file_uploader("Upload Factions Excel", type=["xlsx","xls"])
+    persona_file = st.file_uploader("Upload Personas Excel", type=["xlsx","xls"])
 
     if faction_file and persona_file:
-        # ---------------------------------------
-        # 3. Read the Data
-        # ---------------------------------------
         df_factions = pd.read_excel(faction_file)
         df_personas = pd.read_excel(persona_file)
 
@@ -45,37 +35,24 @@ def main():
         st.subheader("Raw Personas Data")
         st.write(df_personas.head())
 
-        # ---------------------------------------
-        # 3a. Parse Factions
-        # ---------------------------------------
-        # We'll build a dict like:
-        # faction_info = {
-        #   "FactionName": {
-        #       "ignore": True/False,
-        #       "intra_prob": float,
-        #       "fHigh": [...],
-        #       "fMod": [...],
-        #       "fNever": [...]
-        #   },
-        #   ...
-        # }
+        # -------------------------
+        # Parse Factions
+        # -------------------------
         faction_info = {}
         for _, row in df_factions.iterrows():
-            f_name = str(row["Faction"]).strip()
+            # Make sure the column is actually named "Faction" in your Excel
+            faction_name = str(row["Faction"]).strip()
             ignore_flag = row.get("Ignore", 0)
             ignore_bool = (ignore_flag == 1)
 
-            # map the IntraFaction Following text to numeric
             intra_label = str(row.get("IntraFaction Following", "None")).strip()
-            # default to 0 if not in PROB_MAP
             p_intra = PROB_MAP.get(intra_label, 0.0)
 
-            # parse "Factions Following", "Factions who may Follow", "Factions who’ll never Follow"
             fHigh = parse_faction_list(row.get("Factions Following", None))
             fMod  = parse_faction_list(row.get("Factions who may Follow", None))
             fNever= parse_faction_list(row.get("Factions who’ll never Follow", None))
 
-            faction_info[f_name] = {
+            faction_info[faction_name] = {
                 "ignore": ignore_bool,
                 "intra_prob": p_intra,
                 "fHigh": fHigh,
@@ -83,71 +60,44 @@ def main():
                 "fNever": fNever
             }
 
-        # ---------------------------------------
-        # 3b. Parse Personas
-        # ---------------------------------------
-        # We'll store a list of included personas, each a dict with
-        # { "handle": ..., "name": ..., "faction": ..., "tw": ... }
-        # also group them by faction if we want
+        # -------------------------
+        # Parse Personas
+        # -------------------------
         personas = []
         for _, row in df_personas.iterrows():
             handle  = str(row["Handle"]).strip()   # unique ID
             name    = str(row.get("Name", handle))
-            faction = str(row["Faction"]).strip()
+            fac     = str(row["Faction"]).strip()
             tw      = row.get("TwFollowers", 0)
 
-            # if faction not in faction_info or ignored, skip
-            if faction not in faction_info:
+            if fac not in faction_info:
                 continue
-            if faction_info[faction]["ignore"]:
+            if faction_info[fac]["ignore"]:
                 continue
 
             personas.append({
                 "handle": handle,
                 "name": name,
-                "faction": faction,
+                "faction": fac,
                 "tw": float(tw)
             })
 
         st.write(f"Total personas (after ignoring factions) = {len(personas)}")
-
-        # if no personas, exit early
-        if len(personas) == 0:
-            st.warning("No personas found after filtering out ignored factions.")
+        if not personas:
+            st.warning("No personas found. Check your Factions 'Ignore' column or file alignment.")
             return
 
-        # ---------------------------------------
-        # 4. Find max TwFollowers
-        # ---------------------------------------
-        max_tw = max(p["tw"] for p in personas)
-        if max_tw == 0:
-            max_tw = 1.0  # avoid divide-by-zero if all are 0
+        max_tw = max(p["tw"] for p in personas) or 1.0
 
-        # ---------------------------------------
-        # 5. Compute Edge Probabilities
-        # We'll produce a list of edges: (source, target, p_final)
-        # Where source/target = persona.handle
-        # ---------------------------------------
-        edges_prob = []
-
-        # Build a quick index of faction -> list of persona dicts
-        from collections import defaultdict
+        # Index of faction -> list of persona dicts
         faction_personas = defaultdict(list)
         for p in personas:
             faction_personas[p["faction"]].append(p)
 
-        # Helper: get base probability that "factionA" follows "factionB"
-        # from the perspective "A -> B", but the row is B in the table,
-        # which says who follows B.  We'll check if factionA is in B's 'fHigh','fMod','fNever'
+        # Function to get base probability that A->B due to faction logic
         def get_faction_prob(factionA, factionB):
-            # If same faction, use B's intra_faction_prob. Actually we want
-            # the same faction's row for that. But let's keep it simpler:
-            # "intra_faction_prob" is the same for A & B in that faction, so let's pick either row.
             if factionA == factionB:
                 return faction_info[factionA]["intra_prob"]
-
-            # otherwise, see if factionA is in factionB's list
-            # Because "Factions Following" = who follows factionB at High
             infoB = faction_info[factionB]
             if factionA in infoB["fNever"]:
                 return 0.0
@@ -156,27 +106,27 @@ def main():
             elif factionA in infoB["fMod"]:
                 return 0.5
             else:
-                # If silent => assume 0.0 (or pick 0.3 if you want a fallback)
+                # If silent => 0.0 or 0.3 as fallback
                 return 0.0
 
-        # Now create edges
+        # -------------------------
+        # Build edges with probabilities
+        # -------------------------
+        edges_prob = []
         for personaA in personas:
             for personaB in personas:
                 if personaA["handle"] == personaB["handle"]:
-                    continue  # no self-edges
+                    continue
 
                 facA = personaA["faction"]
                 facB = personaB["faction"]
 
                 base_p = get_faction_prob(facA, facB)
                 if base_p == 0.0:
-                    # "never follow" scenario or no match => final prob = 0
                     p_final = 0.0
                 else:
                     ratioB = personaB["tw"] / max_tw
-                    # union-based formula
-                    # p_final = 1 - (1 - base_p)*(1 - ratioB)
-                    p_final = 1 - (1 - base_p) * (1 - ratioB)
+                    p_final = 1 - (1 - base_p)*(1 - ratioB)
 
                 edges_prob.append({
                     "source": personaA["handle"],
@@ -184,31 +134,76 @@ def main():
                     "p_final": p_final
                 })
 
-        # ---------------------------------------
-        # 6. Let user pick whether to randomize
-        # ---------------------------------------
         st.write("### Edge Probability Results")
+
+        # Let user decide to randomize or keep probabilities
         randomize = st.checkbox("Generate a realized following network (random draw)?", value=False)
 
         if randomize:
-            # We'll create a list of only edges that "exist" after random draw
+            # Do random draw
             edges_drawn = []
             for e in edges_prob:
                 if random.random() < e["p_final"]:
-                    edges_drawn.append({
-                        "source": e["source"],
-                        "target": e["target"],
-                        "exists": 1
-                    })
-            st.write(f"Total edges after random draw: {len(edges_drawn)}")
-            st.dataframe(pd.DataFrame(edges_drawn))
-        else:
-            # Show probability
-            st.write("Showing up to first 500 edges (for brevity).")
-            df_edges = pd.DataFrame(edges_prob)
-            st.dataframe(df_edges.head(500))
+                    edges_drawn.append(e)  # or store e with an "exists"=1
 
-        # Optional: you could let user download the edge list
+            st.write(f"Total edges after random draw: {len(edges_drawn)}")
+
+            # -------------------------
+            # Compute in-degree (actual)
+            # -------------------------
+            in_counter = Counter()
+            for e in edges_drawn:
+                in_counter[e["target"]] += 1
+
+            # Create a DataFrame for in-degree
+            # We'll also map the handle to the persona name
+            handle2name = {p["handle"]: p["name"] for p in personas}
+            indegree_list = []
+            for p in personas:
+                h = p["handle"]
+                indeg = in_counter[h]
+                indegree_list.append({
+                    "handle": h,
+                    "name": p["name"],
+                    "in_degree": indeg
+                })
+            df_indegree = pd.DataFrame(indegree_list).sort_values("in_degree", ascending=False)
+
+            st.subheader("In-Degree (Actual) from Realized Network")
+            st.dataframe(df_indegree)
+
+            # Also show edges if wanted
+            st.write("Showing up to first 500 realized edges:")
+            st.dataframe(pd.DataFrame(edges_drawn).head(500))
+
+        else:
+            # No random draw => we have p_final for each edge
+            # We'll treat "in-degree" as the sum of probabilities of incoming edges
+            # i.e. "expected" in-degree
+            incoming_prob_sum = defaultdict(float)
+            for e in edges_prob:
+                incoming_prob_sum[e["target"]] += e["p_final"]
+
+            handle2name = {p["handle"]: p["name"] for p in personas}
+            indegree_list = []
+            for p in personas:
+                h = p["handle"]
+                indeg = incoming_prob_sum[h]
+                indegree_list.append({
+                    "handle": h,
+                    "name": p["name"],
+                    "expected_in_degree": indeg
+                })
+            df_expected_in = pd.DataFrame(indegree_list).sort_values("expected_in_degree", ascending=False)
+
+            st.subheader("In-Degree (Expected)")
+            st.dataframe(df_expected_in)
+
+            st.write("Showing up to first 500 edges (p_final).")
+            st.dataframe(pd.DataFrame(edges_prob).head(500))
+
+        # Optional download of entire edge probability set
+        st.write("### Download Edge Data")
         csv_edges = pd.DataFrame(edges_prob).to_csv(index=False)
         st.download_button(
             label="Download edge probabilities CSV",
@@ -216,7 +211,6 @@ def main():
             file_name="edges_probability.csv",
             mime="text/csv"
         )
-
 
 if __name__ == "__main__":
     main()
