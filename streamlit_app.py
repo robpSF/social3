@@ -19,15 +19,27 @@ def parse_faction_list(cell_value):
     return [x.strip() for x in str(cell_value).split(",") if x.strip()]
 
 def main():
-    st.title("Faction + Personas with Pure Multiplicative Popularity")
+    st.title("Hybrid Model: Faction Probability + Popularity with Baseline Offset")
 
     faction_file = st.file_uploader("Upload Factions Excel", type=["xlsx","xls"])
     persona_file = st.file_uploader("Upload Personas Excel", type=["xlsx","xls"])
 
-    # Slider to scale down large-faction in-faction probability
+    st.write("""
+    **Notes**:
+    - We still scale down large factions' intra-faction probability by `1/(N^exponent)`.
+    - We then multiply by `( ratio_B + alpha )`, clamped at 1.
+    - `alpha` is a small offset so that if `ratio_B=0`, the persona still has some chance (but not huge).
+    """)
+    # Slider for large-faction scaling exponent
     scaling_exponent = st.slider(
         "Intra-Faction Scaling Exponent (0 = no scaling, 0.5 = sqrt, etc.)",
         min_value=0.0, max_value=1.0, value=0.5, step=0.1
+    )
+
+    # Slider for popularity offset alpha
+    alpha = st.slider(
+        "Popularity Offset (alpha)", 0.0, 1.0, 0.2, 0.05,
+        help="When ratio_B=0, final prob = p_faction * alpha"
     )
 
     if faction_file and persona_file:
@@ -92,20 +104,16 @@ def main():
             st.warning("No personas found. Check your Factions 'Ignore' column or file alignment.")
             return
 
-        # Group by faction to figure out how many are in each
-        from collections import defaultdict
+        # Group by faction
         faction_personas = defaultdict(list)
         for p in personas:
             faction_personas[p["faction"]].append(p)
         faction_sizes = {f: len(p_list) for f, p_list in faction_personas.items()}
 
-        # Max TwFollowers
+        # max TwFollowers
         max_tw = max(p["tw"] for p in personas) or 1.0
 
-        # -------------------------
         # Faction Probability Helper
-        # (scaled for large factions)
-        # -------------------------
         def get_faction_prob(fA, fB):
             if fA == fB:
                 base_p = faction_info[fA]["intra_prob"]
@@ -123,12 +131,12 @@ def main():
             elif fA in infoB["fMod"]:
                 return 0.5
             else:
-                # fallback
+                # fallback or silent => 0.0
                 return 0.0
 
         # -------------------------
         # Build edges with probabilities
-        # Using p_final = base_p * ratioB (pure multiplication)
+        # p_final = min(1, p_faction * ( ratio_B + alpha ))
         # -------------------------
         edges_prob = []
         for personaA in personas:
@@ -138,11 +146,15 @@ def main():
 
                 facA = personaA["faction"]
                 facB = personaB["faction"]
-                base_p = get_faction_prob(facA, facB)
 
-                ratioB = personaB["tw"] / max_tw
-                # Multiplicative approach => eliminates big in-degree for 0-TwFollowers
-                p_final = base_p * ratioB
+                base_p = get_faction_prob(facA, facB)
+                if base_p <= 0:
+                    p_final = 0.0
+                else:
+                    ratioB = personaB["tw"] / max_tw
+                    # Hybrid approach
+                    raw_val = base_p * (ratioB + alpha)
+                    p_final = min(1.0, raw_val)
 
                 edges_prob.append({
                     "source": personaA["handle"],
@@ -163,7 +175,6 @@ def main():
 
             st.write(f"Total edges after random draw: {len(edges_drawn)}")
 
-            from collections import Counter
             in_counter = Counter()
             for e in edges_drawn:
                 in_counter[e["target"]] += 1
@@ -187,7 +198,7 @@ def main():
             st.dataframe(pd.DataFrame(edges_drawn).head(500))
 
         else:
-            # No random draw => expected in-degree
+            # Expected in-degree
             incoming_prob_sum = defaultdict(float)
             for e in edges_prob:
                 incoming_prob_sum[e["target"]] += e["p_final"]
