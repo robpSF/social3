@@ -17,17 +17,16 @@ def parse_faction_list(cell_value):
     return [x.strip() for x in str(cell_value).split(",") if x.strip()]
 
 def main():
-    st.title("No-One-Left-Behind Model")
+    st.title("No-One-Left-Behind Model (with Faction in In-Degree Table)")
 
     faction_file = st.file_uploader("Upload Factions Excel", type=["xlsx","xls"])
     persona_file = st.file_uploader("Upload Personas Excel", type=["xlsx","xls"])
 
     st.write("""
     **Approach**:
-    1. Compute a 'base' faction probability (scaled for large factions).
-    2. Final p = min(1, base_p * (ratio_B + alpha)).
-    3. Randomly pick edges. 
-    4. Post-process: ensure everyone has >= 1 follower if any inbound p>0 was possible.
+    - Compute p_final = min(1, p_faction * (ratio_B + alpha)).
+    - Randomly pick edges.
+    - Post-process so everyone has >=1 follower if possible.
     """)
 
     scaling_exponent = st.slider("Intra-Faction Scaling Exponent", 0.0, 1.0, 0.5, 0.1)
@@ -101,6 +100,10 @@ def main():
 
         max_tw = max(p["tw"] for p in personas) or 1.0
 
+        # Build quick lookup for name/faction
+        handle2name = {p["handle"]: p["name"] for p in personas}
+        handle2faction = {p["handle"]: p["faction"] for p in personas}
+
         def get_faction_prob(fA, fB):
             # same faction => scale by 1/(N^exponent)
             if fA == fB:
@@ -121,11 +124,10 @@ def main():
             else:
                 return 0.0
 
-        # --- Build edge probabilities ---
         edges = []
-        # We'll also keep track of all edges that have p_final > 0 for "no-left-out" fix
-        potential_followers_for = defaultdict(list)  # key=target, value=list of (source, p_final)
+        potential_followers_for = defaultdict(list)
 
+        # Calculate p_final
         for A in personas:
             for B in personas:
                 if A["handle"] == B["handle"]:
@@ -136,7 +138,7 @@ def main():
                     p_final = 0.0
                 else:
                     ratioB = B["tw"]/max_tw
-                    raw_val = base_p*(ratioB+alpha)
+                    raw_val = base_p*(ratioB + alpha)
                     p_final = min(1.0, raw_val)
 
                 if p_final>0:
@@ -148,7 +150,6 @@ def main():
                     "p_final": p_final
                 })
 
-        # If user doesn't want randomization, we just show the probabilities
         if not randomize:
             st.subheader("Showing Edge Probabilities Only (No Random Draw)")
             df_edges = pd.DataFrame(edges)
@@ -159,20 +160,20 @@ def main():
             for e in edges:
                 in_prob_sum[e["target"]] += e["p_final"]
             indeg_list = []
-            handle2name = {p["handle"]:p["name"] for p in personas}
             for p in personas:
+                h = p["handle"]
                 indeg_list.append({
-                    "handle": p["handle"],
-                    "name": p["name"],
-                    "expected_in_degree": in_prob_sum[p["handle"]]
+                    "handle": h,
+                    "name": handle2name[h],
+                    "faction": handle2faction[h],  # <---- ADD FACTION HERE
+                    "expected_in_degree": in_prob_sum[h]
                 })
             df_in = pd.DataFrame(indeg_list).sort_values("expected_in_degree", ascending=False)
             st.subheader("Expected In-Degree Ranking")
             st.dataframe(df_in)
 
         else:
-            # --- Random Draw + No One Left Behind Fix ---
-            # 1) draw edges
+            # 1) random draw
             chosen_edges = []
             in_counter = Counter()
             for e in edges:
@@ -180,25 +181,20 @@ def main():
                     chosen_edges.append(e)
                     in_counter[e["target"]] += 1
 
-            # 2) post-process: for each node with in_degree=0 but has potential inbound edges, force 1
+            # 2) fix zero in-degree
             forced_edges = []
             for p in personas:
                 targ = p["handle"]
                 if in_counter[targ] == 0:
-                    # no inbound edges?
                     candidates = potential_followers_for[targ]
                     if candidates:
-                        # pick one at random
                         Ahandle, p_val = random.choice(candidates)
-                        # only force it if it wasn't already chosen
-                        # check if we already have that edge
-                        # (source, target) pair
                         exists = any((ce["source"]==Ahandle and ce["target"]==targ) for ce in chosen_edges)
                         if not exists:
                             new_edge = {
                                 "source": Ahandle,
                                 "target": targ,
-                                "p_final": p_val, 
+                                "p_final": p_val,
                                 "forced": True
                             }
                             chosen_edges.append(new_edge)
@@ -207,16 +203,17 @@ def main():
 
             st.write(f"Total edges after random draw: {len(chosen_edges)}")
             if forced_edges:
-                st.write(f"({len(forced_edges)}) edges were forcibly added so nobody is left at zero in-degree.")
+                st.write(f"({len(forced_edges)}) edges forcibly added so nobody is left at zero in-degree.")
 
-            # 3) show final in-degree
+            # Final in-degree table (actual)
             final_in_deg = []
-            handle2name = {p["handle"]:p["name"] for p in personas}
             for p in personas:
+                h = p["handle"]
                 final_in_deg.append({
-                    "handle": p["handle"],
-                    "name": p["name"],
-                    "in_degree": in_counter[p["handle"]]
+                    "handle": h,
+                    "name": handle2name[h],
+                    "faction": handle2faction[h],  # <---- ADD FACTION HERE
+                    "in_degree": in_counter[h]
                 })
             df_in_deg = pd.DataFrame(final_in_deg).sort_values("in_degree", ascending=False)
             st.subheader("In-Degree (Actual) with No-One-Left-Behind Fix")
@@ -225,7 +222,6 @@ def main():
             st.write("Up to first 500 chosen edges:")
             st.dataframe(pd.DataFrame(chosen_edges).head(500))
 
-        # Download entire edge probability set
         st.write("### Download Edge Probability Data")
         df_all = pd.DataFrame(edges)
         csv_edges = df_all.to_csv(index=False)
