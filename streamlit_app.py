@@ -61,7 +61,7 @@ def main():
         # }
         faction_info = {}
         for _, row in df_factions.iterrows():
-            f_name = str(row["Faction name"]).strip()
+            f_name = str(row["Faction"]).strip()
             ignore_flag = row.get("Ignore", 0)
             ignore_bool = (ignore_flag == 1)
 
