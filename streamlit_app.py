@@ -3,7 +3,7 @@ import pandas as pd
 import random
 from collections import Counter, defaultdict
 
-# Hard-coded mappings for IntraFaction or cross-faction “High/Moderate”
+# Probability mapping if your Faction file uses "High/Moderate/Low"
 PROB_MAP = {
     "High": 0.9,
     "Moderate": 0.5,
@@ -12,67 +12,89 @@ PROB_MAP = {
 }
 
 def parse_faction_list(cell_value):
-    """Parse comma-separated factions from a cell, or return an empty list if blank."""
+    """Parse a comma-separated list of faction names from the cell."""
     if pd.isna(cell_value) or str(cell_value).strip() == "":
         return []
     return [x.strip() for x in str(cell_value).split(",") if x.strip()]
 
 def main():
-    st.title("Option 2: Celebrity + Faction (Union Formula)")
+    st.title("Option 2 Extended: Celebrity + Faction + Large-Faction Scaling")
 
+    # File uploaders
     faction_file = st.file_uploader("Upload Factions Excel", type=["xlsx","xls"])
     persona_file = st.file_uploader("Upload Personas Excel", type=["xlsx","xls"])
 
-    st.write("""
-    **Logic**:
-    1. Celebrity prob = alpha * (B's TwFollowers / maxTw).
-    2. Faction prob = see if A's faction is listed in B's row:
-       - never => 0
-       - High => 0.9
-       - Moderate => 0.5
-       - else => 0
-    3. Final = 1 - (1 - p_celeb)*(1 - p_faction).
-    4. If faction is "ignore=1", skip its personas entirely.
+    st.markdown("""
+    **Logic**  
+    1. **Celebrity probability**:  
+       \\[
+         p_{\\text{celeb}}(B) = \\alpha * \\frac{B.\\text{TwFollowers}}{\\max(\\text{TwFollowers})}
+       \\]
+    2. **Faction probability** \\(p_{\\text{faction}}\\), either from:  
+       - “High” = 0.9,  
+       - “Moderate” = 0.5,  
+       - “never” = 0,  
+       - or unmentioned => 0.  
+       - If same faction, use that row's `intra_prob`.  
+    3. **Scale** that probability by \\(1/(\\text{size}(A)^\\beta)\\) so large factions don't overwhelm everyone.  
+       \\[
+         p_{\\text{faction}}' = \\frac{ p_{\\text{faction}} }{ (\\text{size of faction A})^{\\beta} }
+       \\]
+    4. **Combine** by **union**:  
+       \\[
+         p_{\\text{final}} = 1 - (1 - p_{\\text{celeb}})(1 - p_{\\text{faction}}')
+       \\]
+    5. If “Ignore=1,” skip that faction's personas entirely.
     """)
 
-    alpha = st.slider("Celebrity Weight (alpha)", 0.0, 1.0, 0.5, 0.05)
-    randomize = st.checkbox("Random draw to create realized edges?", value=True)
+    alpha = st.slider("Celebrity Weight (alpha)", 0.0, 1.0, 0.5, 0.05,
+                     help="Scales how strongly TwFollowers influences following.")
+    exponent = st.slider("Faction Size Exponent (beta)", 0.0, 1.0, 0.5, 0.05,
+                         help="Larger beta => bigger factions get proportionally reduced more strongly.")
+    do_random_draw = st.checkbox("Perform random draw to form actual edges?", value=True)
 
     if faction_file and persona_file:
+        # ------------------------------
+        # 1) Read the Excel files
+        # ------------------------------
         df_factions = pd.read_excel(faction_file)
         df_personas = pd.read_excel(persona_file)
 
-        st.subheader("Raw Factions Data")
+        st.subheader("Factions Data Preview")
         st.write(df_factions.head())
 
-        st.subheader("Raw Personas Data")
+        st.subheader("Personas Data Preview")
         st.write(df_personas.head())
 
-        # Parse the Factions
+        # ------------------------------
+        # 2) Parse Factions
+        # ------------------------------
         faction_info = {}
         for _, row in df_factions.iterrows():
             fac_name = str(row["Faction"]).strip()
-            ignore_flag = row.get("Ignore", 0)
-            ignore_bool = (ignore_flag == 1)
+            ign_flag = row.get("Ignore", 0)
+            ignore_bool = (ign_flag == 1)
 
-            # Possibly store intrafaction following if you want it
+            # Intra-faction
             intra_label = str(row.get("IntraFaction Following", "None")).strip()
-            intra_prob = PROB_MAP.get(intra_label, 0.0)
+            intra_p = PROB_MAP.get(intra_label, 0.0)
 
             # Cross-faction columns
-            fHigh = parse_faction_list(row.get("Factions Following", None))
-            fMod  = parse_faction_list(row.get("Factions who may Follow", None))
-            fNever= parse_faction_list(row.get("Factions who’ll never Follow", None))
+            fHigh   = parse_faction_list(row.get("Factions Following", None))
+            fMod    = parse_faction_list(row.get("Factions who may Follow", None))
+            fNever  = parse_faction_list(row.get("Factions who’ll never Follow", None))
 
             faction_info[fac_name] = {
                 "ignore": ignore_bool,
-                "intra_prob": intra_prob,
+                "intra_prob": intra_p,
                 "fHigh": fHigh,
                 "fMod": fMod,
                 "fNever": fNever
             }
 
-        # Parse Personas
+        # ------------------------------
+        # 3) Parse Personas
+        # ------------------------------
         personas = []
         for _, row in df_personas.iterrows():
             handle = str(row["Handle"]).strip()
@@ -80,7 +102,7 @@ def main():
             fac    = str(row["Faction"]).strip()
             tw     = float(row.get("TwFollowers", 0))
 
-            # Skip if faction not found or faction is ignored
+            # skip if faction is ignored or not found
             if fac not in faction_info:
                 continue
             if faction_info[fac]["ignore"]:
@@ -93,34 +115,35 @@ def main():
                 "tw": tw
             })
 
-        st.write(f"Total personas (after ignoring) = {len(personas)}")
+        st.write(f"Total personas after ignoring: {len(personas)}")
         if not personas:
             st.stop()
 
-        # Quick lookups
+        # Build quick lookups
         handle2name = {p["handle"]: p["name"] for p in personas}
-        handle2faction = {p["handle"]: p["faction"] for p in personas}
+        handle2fac  = {p["handle"]: p["faction"] for p in personas}
 
-        # Max Tw
+        # Group personas by faction, so we know how large each faction is
+        from collections import defaultdict
+        faction_personas = defaultdict(list)
+        for p in personas:
+            faction_personas[p["faction"]].append(p)
+        faction_sizes = {f: len(lst) for f,lst in faction_personas.items()}
+
+        # max TwFollowers
         max_tw = max(p["tw"] for p in personas) or 1.0
 
-        # Faction prob
+        # ------------------------------
+        # Helper: get base faction prob
+        # ------------------------------
         def get_faction_prob(fA, fB):
-            """
-            Cross-Faction:
-             - If fA in fB's "never", => 0
-             - If fA in fB's "fHigh", => 0.9
-             - If fA in fB's "fMod", => 0.5
-             else => 0.0
-            Intra-Faction: if fA == fB, could use row's 'intra_prob' or skip it.
-            """
+            """Return the 'base' probability that A's faction follows B's faction, ignoring large-faction scaling."""
             if fA == fB:
-                # Intra-faction: for demonstration, let's just return the row's intra_prob
+                # Intra-faction
                 return faction_info[fA]["intra_prob"]
 
             infoB = faction_info[fB]
             if fA in infoB["fNever"]:
-                # "never follow" B => 0
                 return 0.0
             elif fA in infoB["fHigh"]:
                 return 0.9
@@ -129,95 +152,102 @@ def main():
             else:
                 return 0.0
 
+        # ------------------------------
+        # 4) Compute final edge probabilities
+        # Union of celebrity + faction, with scaling for large factions
+        # ------------------------------
         edges_prob = []
-        # Build edges with union formula
         for A in personas:
             for B in personas:
                 if A["handle"] == B["handle"]:
                     continue
 
-                p_celeb = alpha * (B["tw"] / max_tw)  # celebrity factor
-                p_f = get_faction_prob(A["faction"], B["faction"])
+                # 1) Celebrity prob
+                p_celeb = alpha * (B["tw"] / max_tw)
 
-                # Union => 1 - (1 - p_celeb)*(1 - p_f)
-                # If "never follow" truly trumps celebrity, you can handle that as p_final=0 if p_f=0 for "never."
-                p_final = 1 - (1 - p_celeb)*(1 - p_f)
+                # 2) Base faction prob
+                base_f = get_faction_prob(A["faction"], B["faction"])
 
-                # If you interpret "never" as absolute zero, you could do:
-                #   if A.faction in infoB["fNever"]: p_final = 0
+                # 3) Scale down if faction A is large
+                fac_size = faction_sizes[A["faction"]]
+                if fac_size > 1 and base_f > 0 and exponent>0:
+                    scale_factor = (fac_size ** exponent)
+                    base_f = base_f / scale_factor
 
-                # clamp
-                if p_final < 0:
-                    p_final = 0
-                elif p_final > 1:
-                    p_final = 1
+                # 4) Union
+                p_final = 1 - (1 - p_celeb)*(1 - base_f)
 
                 edges_prob.append({
                     "source": A["handle"],
                     "target": B["handle"],
                     "p_celeb": p_celeb,
-                    "p_faction": p_f,
+                    "p_faction_raw": get_faction_prob(A["faction"], B["faction"]),  # just for debugging
+                    "p_faction_scaled": base_f,
                     "p_final": p_final
                 })
 
-        # Show or randomize
-        if randomize:
+        # ------------------------------
+        # 5) Display + Random Draw
+        # ------------------------------
+        if do_random_draw:
             chosen_edges = []
+            from collections import Counter
             in_counter = Counter()
+
             for e in edges_prob:
                 if random.random() < e["p_final"]:
                     chosen_edges.append(e)
                     in_counter[e["target"]] += 1
 
-            st.write(f"Total edges after random draw: {len(chosen_edges)}")
+            st.write(f"Random-draw edges: {len(chosen_edges)}")
 
-            # In-degree table
-            in_deg_list = []
+            # Build an in-degree table
+            in_deg_table = []
             for p in personas:
                 h = p["handle"]
-                in_deg = in_counter[h]
-                in_deg_list.append({
+                in_deg_table.append({
                     "handle": h,
                     "name": handle2name[h],
-                    "faction": handle2faction[h],
-                    "in_degree": in_deg
+                    "faction": handle2fac[h],
+                    "in_degree": in_counter[h]
                 })
-            df_in_deg = pd.DataFrame(in_deg_list).sort_values("in_degree", ascending=False)
-            st.subheader("In-degree (Actual)")
+            df_in_deg = pd.DataFrame(in_deg_table).sort_values("in_degree", ascending=False)
+            st.subheader("In-Degree (Actual)")
             st.dataframe(df_in_deg)
 
-            st.write("Showing up to first 500 edges:")
+            st.write("Showing first 500 edges:")
             st.dataframe(pd.DataFrame(chosen_edges).head(500))
 
         else:
-            st.subheader("Edges with Probability (No Random Draw)")
-            st.write("Showing up to first 500 edges:")
-            df_edges = pd.DataFrame(edges_prob)
-            st.dataframe(df_edges.head(500))
+            st.subheader("Probabilistic Edges (No Random Draw)")
+            st.write("Showing first 500 edges:")
+            df_prob = pd.DataFrame(edges_prob)
+            st.dataframe(df_prob.head(500))
 
             # Expected in-degree
             in_sum = defaultdict(float)
             for e in edges_prob:
                 in_sum[e["target"]] += e["p_final"]
-            in_deg_list = []
+            rows = []
             for p in personas:
                 h = p["handle"]
-                in_deg_list.append({
+                rows.append({
                     "handle": h,
                     "name": handle2name[h],
-                    "faction": handle2faction[h],
+                    "faction": handle2fac[h],
                     "expected_in_degree": in_sum[h]
                 })
-            df_in_deg = pd.DataFrame(in_deg_list).sort_values("expected_in_degree", ascending=False)
+            df_in = pd.DataFrame(rows).sort_values("expected_in_degree", ascending=False)
             st.subheader("Expected In-Degree")
-            st.dataframe(df_in_deg)
+            st.dataframe(df_in)
 
-        # Optionally let user download
+        # Download option
+        st.write("### Download all edges probabilities as CSV")
         csv_data = pd.DataFrame(edges_prob).to_csv(index=False)
         st.download_button(
-            "Download Edge Probabilities CSV",
+            "Download Edges CSV",
             data=csv_data,
-            file_name="edge_probabilities.csv",
+            file_name="edges_prob.csv",
             mime="text/csv"
         )
 
